@@ -1132,15 +1132,21 @@ bool KD_TREE::Criterion_Check(KD_TREE_NODE * root){
 // The Pushdown function copies the labels deleted, treedeleted, and pushdown of T to its sons (but
 // not further offsprings) when the attribute pushdown is true.
 // 当属性Pushdown 为true时，Pushdown 函数将被deleted, treedeleted, 
-// 和 pushdown的标签复制到它的子节点（但不没有复制到它的的后代。
+// 和 pushdown的标签复制到它的子节点（但没有复制到它的的后代。
 void KD_TREE::Push_Down(KD_TREE_NODE *root){
     if (root == nullptr) return;
+    // 实例化一个操作记录器
     Operation_Logger_Type operation;
+    // 操作器设置为PUSH_DOWN状态
     operation.op = PUSH_DOWN;
+    // 获取当前节点的删除标签，用于传递给子节点
     operation.tree_deleted = root->tree_deleted;
+    // 同样，获取当前节点的降采样删除标签，用于传递给子节点
     operation.tree_downsample_deleted = root->tree_downsample_deleted;
+    // 左子节点不为空，且该节点需要push down
     if (root->need_push_down_to_left && root->left_son_ptr != nullptr){
         if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != root->left_son_ptr){
+            // 将当前节点的删除标签传递给左子节点
             root->left_son_ptr->tree_downsample_deleted |= root->tree_downsample_deleted;
             root->left_son_ptr->point_downsample_deleted |= root->tree_downsample_deleted;
             root->left_son_ptr->tree_deleted = root->tree_deleted || root->left_son_ptr->tree_downsample_deleted;
@@ -1148,8 +1154,10 @@ void KD_TREE::Push_Down(KD_TREE_NODE *root){
             if (root->tree_downsample_deleted) root->left_son_ptr->down_del_num = root->left_son_ptr->TreeSize;
             if (root->tree_deleted) root->left_son_ptr->invalid_point_num = root->left_son_ptr->TreeSize;
                 else root->left_son_ptr->invalid_point_num = root->left_son_ptr->down_del_num;
+            // 标记下左子节点的状态更新情况，设为true意味着左子节点更新完，它的属性也要传递给后代节点
             root->left_son_ptr->need_push_down_to_left = true;
             root->left_son_ptr->need_push_down_to_right = true;
+            // 当前节点属性已经Push down了，所以可以将其更新push down需求设为false
             root->need_push_down_to_left = false;                
         } else {
             pthread_mutex_lock(&working_flag_mutex);
@@ -1171,6 +1179,7 @@ void KD_TREE::Push_Down(KD_TREE_NODE *root){
             pthread_mutex_unlock(&working_flag_mutex);            
         }
     }
+    // 对于右子节点也是相同的Push down操作，传递当前节点的属性下去
     if (root->need_push_down_to_right && root->right_son_ptr != nullptr){
         if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != root->right_son_ptr){
             root->right_son_ptr->tree_downsample_deleted |= root->tree_downsample_deleted;
