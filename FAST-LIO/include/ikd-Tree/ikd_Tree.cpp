@@ -211,6 +211,8 @@ void KD_TREE::multi_thread_rebuild(){
     terminated = termination_flag;
     pthread_mutex_unlock(&termination_flag_mutex_lock);
     while (!terminated){
+        // The second thread will lock all incremental updates (i.e., points insert, re-insert,
+        // and delete) but not queries on this sub-tree
         pthread_mutex_lock(&rebuild_ptr_mutex_lock);
         pthread_mutex_lock(&working_flag_mutex);
         if (Rebuild_Ptr != nullptr ){                    
@@ -373,7 +375,7 @@ void KD_TREE::Build(PointVector point_cloud){
 
 // K近邻搜索
 void KD_TREE::Nearest_Search(PointType point, int k_nearest, PointVector& Nearest_Points, vector<float> & Point_Distance, double max_dist){   
-    // 自定义的堆
+    // 初始化自定义的大顶堆，容量为2*k_nearest
     MANUAL_HEAP q(2*k_nearest);
     q.clear();
     // 清空Point_Distance
@@ -402,6 +404,7 @@ void KD_TREE::Nearest_Search(PointType point, int k_nearest, PointVector& Neares
     vector<float> ().swap(Point_Distance);
     // 存储
     for (int i=0;i < k_found;i++){
+        // 优先取出最近的点
         Nearest_Points.insert(Nearest_Points.begin(), q.top().point);
         Point_Distance.insert(Point_Distance.begin(), q.top().dist);
         q.pop();
@@ -507,7 +510,7 @@ int KD_TREE::Add_Points(PointVector & PointToAdd, bool downsample_on){
     return tmp_counter;
 }
 
-// 以体素的形式添加点
+// 以体素的形式添加点（re-insertion）
 void KD_TREE::Add_Point_Boxes(vector<BoxPointType> & BoxPoints){     
     for (int i=0;i < BoxPoints.size();i++){
         if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){
