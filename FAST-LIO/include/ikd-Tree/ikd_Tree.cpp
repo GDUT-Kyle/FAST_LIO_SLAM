@@ -206,21 +206,27 @@ void * KD_TREE::multi_thread_ptr(void * arg){
 // Algorithm 4: Parallelly Rebuild for Re-balancing
 void KD_TREE::multi_thread_rebuild(){
     bool terminated = false;
+    // 新建虚拟头结点和重建的树的新节点
     KD_TREE_NODE * father_ptr, ** new_node_ptr;
     pthread_mutex_lock(&termination_flag_mutex_lock);
+    // KD树初始化时termination_flag被设为false，所以后面的while循环是一直进行的
     terminated = termination_flag;
     pthread_mutex_unlock(&termination_flag_mutex_lock);
     while (!terminated){
         // The second thread will lock all incremental updates (i.e., points insert, re-insert,
         // and delete) but not queries on this sub-tree
+        // 锁定了插入、重插入、删除功能，但不锁定查询功能
         pthread_mutex_lock(&rebuild_ptr_mutex_lock);
         pthread_mutex_lock(&working_flag_mutex);
+        // Rebuild_Ptr是一个tree_node类型的指针的指针
         if (Rebuild_Ptr != nullptr ){                    
             /* Traverse and copy */
+            // 如果需要重建树的话，会先将树展平放到Rebuild_Logger里，如果这个记录器为空的话，但是又要求重建的话，那会报错
             if (!Rebuild_Logger.empty()){
                 printf("\n\n\n\n\n\n\n\n\n\n\n ERROR!!! \n\n\n\n\n\n\n\n\n");
             }
             rebuild_flag = true;
+            // 判断重建的子树的根节点是否为整棵树的根节点
             if (*Rebuild_Ptr == Root_Node) {
                 Treesize_tmp = Root_Node->TreeSize;
                 Validnum_tmp = Root_Node->TreeSize - Root_Node->invalid_point_num;
@@ -240,7 +246,8 @@ void KD_TREE::multi_thread_rebuild(){
             search_mutex_counter = -1;
             pthread_mutex_unlock(&search_flag_mutex);
             // Lock deleted points cache
-            pthread_mutex_lock(&points_deleted_rebuild_mutex_lock);    
+            pthread_mutex_lock(&points_deleted_rebuild_mutex_lock);
+            // 将树展平    
             flatten(*Rebuild_Ptr, Rebuild_PCL_Storage, MULTI_THREAD_REC);
             // Unlock deleted points cache
             pthread_mutex_unlock(&points_deleted_rebuild_mutex_lock);
@@ -252,18 +259,23 @@ void KD_TREE::multi_thread_rebuild(){
             /* Rebuild and update missed operations*/
             Operation_Logger_Type Operation;
             KD_TREE_NODE * new_root_node = nullptr;  
+            // 如果展平的树的节点大于0，则可以开始重建
             if (int(Rebuild_PCL_Storage.size()) > 0){
+                // 重建树，树的根节点为new_root_node
                 BuildTree(&new_root_node, 0, Rebuild_PCL_Storage.size()-1, Rebuild_PCL_Storage);
                 // Rebuild has been done. Updates the blocked operations into the new tree
                 pthread_mutex_lock(&working_flag_mutex);
                 pthread_mutex_lock(&rebuild_logger_mutex_lock);
                 int tmp_counter = 0;
+                // 重建树完成后，将中途的更新操作（插入、重插入、删除）操作补充
                 while (!Rebuild_Logger.empty()){
+                    // 读取操作，是插入？重插入？还是删除？
                     Operation = Rebuild_Logger.front();
                     max_queue_size = max(max_queue_size, Rebuild_Logger.size());
                     Rebuild_Logger.pop();
                     pthread_mutex_unlock(&rebuild_logger_mutex_lock);                  
                     pthread_mutex_unlock(&working_flag_mutex);
+                    // 在新的树中操作
                     run_operation(&new_root_node, Operation);
                     tmp_counter ++;
                     if (tmp_counter % 10 == 0) usleep(1);
@@ -282,6 +294,7 @@ void KD_TREE::multi_thread_rebuild(){
             }
             search_mutex_counter = -1;
             pthread_mutex_unlock(&search_flag_mutex);
+            // 用新树替换原来的树
             if (father_ptr->left_son_ptr == *Rebuild_Ptr) {
                 father_ptr->left_son_ptr = new_root_node;
             } else if (father_ptr->right_son_ptr == *Rebuild_Ptr){             
@@ -289,12 +302,16 @@ void KD_TREE::multi_thread_rebuild(){
             } else {
                 throw "Error: Father ptr incompatible with current node\n";
             }
+            // 给新的子树重新配置虚拟头结点
             if (new_root_node != nullptr) new_root_node->father_ptr = father_ptr;
+            // 将新的头结点赋给重建的树
             (*Rebuild_Ptr) = new_root_node;
+            // 重新配置树的属性
             int valid_old = old_root_node->TreeSize-old_root_node->invalid_point_num;
             int valid_new = new_root_node->TreeSize-new_root_node->invalid_point_num;
             if (father_ptr == STATIC_ROOT_NODE) Root_Node = STATIC_ROOT_NODE->left_son_ptr;
             KD_TREE_NODE * update_root = *Rebuild_Ptr;
+            // 将子树属性上拉到树的根节点
             while (update_root != nullptr && update_root != Root_Node){
                 update_root = update_root->father_ptr;
                 if (update_root->working_flag) break;
@@ -665,13 +682,19 @@ void KD_TREE::Rebuild(KD_TREE_NODE ** root){
     KD_TREE_NODE * father_ptr;
     // 如果树的节点数大于阈值，则启动多线程进行重建
     if ((*root)->TreeSize >= Multi_Thread_Rebuild_Point_Num) { 
-        if (!pthread_mutex_trylock(&rebuild_ptr_mutex_lock)){     
+        // pthread_mutex_trylock() 是 pthread_mutex_lock() 的非阻塞版本。
+        // 如果 mutex 所引用的互斥对象当前被任何线程（包括当前线程）锁定，则将立即返
+        // 回该调用。否则，该互斥锁将处于锁定状态，调用线程是其属主。
+        if (!pthread_mutex_trylock(&rebuild_ptr_mutex_lock)){  // true：成功加锁，fasle：其他线程已上锁   
+            // 如果重建树的指针为空，或者当前子树的尺寸比正在重建的子树大，则将重建树的根节点设为当前根节点
             if (Rebuild_Ptr == nullptr || ((*root)->TreeSize > (*Rebuild_Ptr)->TreeSize)) {
-                Rebuild_Ptr = root;          
+                Rebuild_Ptr = root;
             }
             pthread_mutex_unlock(&rebuild_ptr_mutex_lock);
+            // 解锁之后即开始启动多线程重建
         }
     } else { // 单线程重建
+        // 暂存虚拟父节点
         father_ptr = (*root)->father_ptr;
         int size_rec = (*root)->TreeSize;
         PCL_Storage.clear();
@@ -756,7 +779,10 @@ int KD_TREE::Delete_by_range(KD_TREE_NODE ** root,  BoxPointType boxpoint, bool 
     // 属性上拉
     Update(*root);   
     // 平衡性准则判断是否需要重建树  
-    if (Rebuild_Ptr != nullptr && *Rebuild_Ptr == *root && (*root)->TreeSize < Multi_Thread_Rebuild_Point_Num) Rebuild_Ptr = nullptr; 
+    // 判断条件解读：重建树的指针的指针不为空，且重建树的指针为当前树的根节点，说明从上次重建后，就没有再更新这棵树的结构
+    // 当前树的节点个数小于多线程重建的最小点阈值，则只需要单线程重建即可
+    if (Rebuild_Ptr != nullptr && *Rebuild_Ptr == *root && (*root)->TreeSize < Multi_Thread_Rebuild_Point_Num) 
+        Rebuild_Ptr = nullptr;  // 将Rebuild_Ptr设为空，即标记需要重建子树
     bool need_rebuild = allow_rebuild & Criterion_Check((*root));
     if (need_rebuild) Rebuild(root);
     if ((*root) != nullptr) (*root)->working_flag = false;
@@ -880,6 +906,7 @@ void KD_TREE::Add_by_range(KD_TREE_NODE ** root, BoxPointType boxpoint, bool all
     if (Rebuild_Ptr != nullptr && *Rebuild_Ptr == *root && (*root)->TreeSize < Multi_Thread_Rebuild_Point_Num) Rebuild_Ptr = nullptr; 
     // 平衡性准则判断是否需要重建子树
     bool need_rebuild = allow_rebuild & Criterion_Check((*root));
+    // 启动重建该子树
     if (need_rebuild) Rebuild(root);
     if ((*root) != nullptr) (*root)->working_flag = false;   
     return;
@@ -1153,15 +1180,21 @@ void KD_TREE::Search_by_range(KD_TREE_NODE *root, BoxPointType boxpoint, PointVe
 }
 
 bool KD_TREE::Criterion_Check(KD_TREE_NODE * root){
+    // 如果当前树的总节点个数小于最小的树的size，则没必要重建，返回false
     if (root->TreeSize <= Minimal_Unbalanced_Tree_Size){
         return false;
     }
+    // 平衡性归零
     float balance_evaluation = 0.0f;
     float delete_evaluation = 0.0f;
+    // 新建一个节点指针存储树的根节点，root是虚拟头结点
     KD_TREE_NODE * son_ptr = root->left_son_ptr;
     if (son_ptr == nullptr) son_ptr = root->right_son_ptr;
+    // 无效点在树中所占的比例
     delete_evaluation = float(root->invalid_point_num)/ root->TreeSize;
+    // 有效点在树中所占的比例
     balance_evaluation = float(son_ptr->TreeSize) / (root->TreeSize-1);  
+    // 论文中的平衡性判断准则
     if (delete_evaluation > delete_criterion_param){
         return true;
     }
