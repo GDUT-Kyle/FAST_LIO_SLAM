@@ -398,9 +398,9 @@ void KD_TREE::Nearest_Search(PointType point, int k_nearest, PointVector& Neares
     // 清空Point_Distance
     vector<float> ().swap(Point_Distance);
     // 开始搜索
-    if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){
+    if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){ // 重建没有进行
         Search(Root_Node, k_nearest, point, q, max_dist);
-    } else {
+    } else {                                                   // 重建正在进行
         pthread_mutex_lock(&search_flag_mutex);
         while (search_mutex_counter == -1)
         {
@@ -984,7 +984,7 @@ void KD_TREE::Add_by_point(KD_TREE_NODE ** root, PointType point, bool allow_reb
 
 // k近邻搜索，这是一个前序遍历的过程
 void KD_TREE::Search(KD_TREE_NODE * root, int k_nearest, PointType point, MANUAL_HEAP &q, double max_dist){
-    // 如果树都还没建，那就没必要搜索了
+    // 到达叶子节点则返回
     if (root == nullptr || root->tree_deleted) return;   
     // 计算目标点与tree的box边界的最小距离（假设目标点不在box内），如果最小距离大于限定距离，则不搜索了
     double cur_dist = calc_box_dist(root, point);
