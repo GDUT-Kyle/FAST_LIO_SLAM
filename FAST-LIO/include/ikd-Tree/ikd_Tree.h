@@ -23,16 +23,21 @@ typedef vector<PointType, Eigen::aligned_allocator<PointType>>  PointVector;
 
 const PointType ZeroP;
 
+// 树节点类
 struct KD_TREE_NODE
 {
     // 该节点对应的点坐标
     PointType point;
     // 划分轴
-    int division_axis;  
+    int division_axis; 
+    // 当前子树的size 
     int TreeSize = 1;
+    // 被删除点的个数
     int invalid_point_num = 0;
     int down_del_num = 0;
+    // 该点被删除的标签
     bool point_deleted = false;
+    // 该子树被删除的标签
     bool tree_deleted = false; 
     bool point_downsample_deleted = false;
     bool tree_downsample_deleted = false;
@@ -40,6 +45,7 @@ struct KD_TREE_NODE
     bool need_push_down_to_right = false;
     bool working_flag = false;
     pthread_mutex_t push_down_mutex_lock;
+    // 该子树的点张成的包络框两个顶点
     float node_range_x[2], node_range_y[2], node_range_z[2];   
     // 左右子节点
     KD_TREE_NODE *left_son_ptr = nullptr;
