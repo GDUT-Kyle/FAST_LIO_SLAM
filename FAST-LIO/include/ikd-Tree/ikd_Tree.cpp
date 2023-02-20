@@ -471,7 +471,7 @@ int KD_TREE::Add_Points(PointVector & PointToAdd, bool downsample_on){
     bool downsample_switch = downsample_on && DOWNSAMPLE_SWITCH;
     float min_dist, tmp_dist;
     int tmp_counter = 0;
-    // 遍历点集
+    // 遍历点集，逐个插入
     for (int i=0; i<PointToAdd.size();i++){
         // 判断是否需要降采样
         // 获得插入点所在的Voxel，计算Voxel的几何中心点（将来只保留最接近中心点的point）
@@ -538,15 +538,18 @@ int KD_TREE::Add_Points(PointVector & PointToAdd, bool downsample_on){
                     pthread_mutex_unlock(&working_flag_mutex);
                 };
             }
-        } else { // 不需要降采样 如果不需要降采样，且无并行re-balancing任务，直接插入点。
+        } else { // 不需要降采样
+            // 不需要重建 或 带重建的子树不是当前整个树（Root_Node）
             if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){
+                // 直接插入单个点
                 Add_by_point(&Root_Node, PointToAdd[i], true, Root_Node->division_axis);     
-            } else { // 如果有并行re-balancing任务，还需额外把当前操作放入logger缓存。
+            } else { // 如果有并行re-balancing任务，还需额外把当前操作放入logger缓存，等重建完成后补作业
                 Operation_Logger_Type operation;
                 operation.point = PointToAdd[i];
                 operation.op = ADD_POINT;                
                 pthread_mutex_lock(&working_flag_mutex);
                 Add_by_point(&Root_Node, PointToAdd[i], false, Root_Node->division_axis);
+                // 记录本次插入点的操作
                 if (rebuild_flag){
                     pthread_mutex_lock(&rebuild_logger_mutex_lock);
                     Rebuild_Logger.push(operation);
@@ -559,12 +562,14 @@ int KD_TREE::Add_Points(PointVector & PointToAdd, bool downsample_on){
     return tmp_counter;
 }
 
-// 以体素的形式添加点（re-insertion）
+// 以体素的形式添加点,实际上不是插入新点，而是重插入已标记删除的旧点（re-insertion）
 void KD_TREE::Add_Point_Boxes(vector<BoxPointType> & BoxPoints){     
+    // 遍历每个box
     for (int i=0;i < BoxPoints.size();i++){
+        // 无需多线程重建
         if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){
             Add_by_range(&Root_Node ,BoxPoints[i], true);
-        } else {
+        } else { // 当前子树正在多线程重建
             Operation_Logger_Type operation;
             operation.boxpoint = BoxPoints[i];
             operation.op = ADD_BOX;
@@ -583,15 +588,20 @@ void KD_TREE::Add_Point_Boxes(vector<BoxPointType> & BoxPoints){
 
 // 删除多个点
 void KD_TREE::Delete_Points(PointVector & PointToDel){        
+    // 逐个点删除
     for (int i=0;i<PointToDel.size();i++){
-        if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){               
+        // 不需要重建 或 待重建的树不是根节点树
+        if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){    
+            // 直接删除指定点           
             Delete_by_point(&Root_Node, PointToDel[i], true);
-        } else {
+        } else { // 逆否命题：需要重建 且 根节点树需要重建
             Operation_Logger_Type operation;
             operation.point = PointToDel[i];
             operation.op = DELETE_POINT;
-            pthread_mutex_lock(&working_flag_mutex);        
+            pthread_mutex_lock(&working_flag_mutex);
+            // 在旧的根节点树上进行删除操作        
             Delete_by_point(&Root_Node, PointToDel[i], false);
+            // 待重建完成后，在新的根节点树上补作业
             if (rebuild_flag){
                 pthread_mutex_lock(&rebuild_logger_mutex_lock);
                 Rebuild_Logger.push(operation);
@@ -765,7 +775,6 @@ int KD_TREE::Delete_by_range(KD_TREE_NODE ** root,  BoxPointType boxpoint, bool 
     if (boxpoint.vertex_max[2] <= (*root)->node_range_z[0] || boxpoint.vertex_min[2] > (*root)->node_range_z[1]) return 0;
     
     // 当Box完全包含了节点所张成的空间时，把该节点subtree上的所有点标记删除。
-    // Box包含了整一棵树的Box
     if (boxpoint.vertex_min[0] <= (*root)->node_range_x[0] && boxpoint.vertex_max[0] > (*root)->node_range_x[1] && boxpoint.vertex_min[1] <= (*root)->node_range_y[0] && boxpoint.vertex_max[1] > (*root)->node_range_y[1] && boxpoint.vertex_min[2] <= (*root)->node_range_z[0] && boxpoint.vertex_max[2] > (*root)->node_range_z[1]){
         // 整棵树的属性都标记为删除
         (*root)->tree_deleted = true;
@@ -785,7 +794,7 @@ int KD_TREE::Delete_by_range(KD_TREE_NODE ** root,  BoxPointType boxpoint, bool 
     }
 
     // 如果当前节点的point被Box包含，标记删除该point。
-    // 当前节点是否被包含在给定box内
+    // 关键：当前节点是否被包含在给定box内，如果在的话就删除。因此box删除本质上也是逐个点地删除，从根节点向下收缩
     if (!(*root)->point_deleted && boxpoint.vertex_min[0] <= (*root)->point.x && boxpoint.vertex_max[0] > (*root)->point.x && boxpoint.vertex_min[1] <= (*root)->point.y && boxpoint.vertex_max[1] > (*root)->point.y && boxpoint.vertex_min[2] <= (*root)->point.z && boxpoint.vertex_max[2] > (*root)->point.z){
         (*root)->point_deleted = true;
         tmp_counter += 1;
@@ -799,11 +808,15 @@ int KD_TREE::Delete_by_range(KD_TREE_NODE ** root,  BoxPointType boxpoint, bool 
     delete_box_log.boxpoint = boxpoint;
 
     // 左子树递归删除
+    // 不需要多线程重建
     if ((Rebuild_Ptr == nullptr) || (*root)->left_son_ptr != *Rebuild_Ptr){
+        // 递归到左子树，然后重复本步骤，判断左子节点的点是否包含在Box内，如果在的话就标记删除
         tmp_counter += Delete_by_range(&((*root)->left_son_ptr), boxpoint, allow_rebuild, is_downsample);
-    } else {
+    } else { // 正在多线程重建
         pthread_mutex_lock(&working_flag_mutex);
+        // 在旧子树里操作
         tmp_counter += Delete_by_range(&((*root)->left_son_ptr), boxpoint, false, is_downsample);
+        // 完成重建后在新子树中补作业
         if (rebuild_flag){
             pthread_mutex_lock(&rebuild_logger_mutex_lock);
             Rebuild_Logger.push(delete_box_log);
@@ -847,8 +860,8 @@ void KD_TREE::Delete_by_point(KD_TREE_NODE ** root, PointType point, bool allow_
     Push_Down(*root);
     // 搜索到目标点，且目标点还未被标记删除，则标记为删除
     if (same_point((*root)->point, point) && !(*root)->point_deleted) {          
-        (*root)->point_deleted = true;
-        (*root)->invalid_point_num += 1;
+        (*root)->point_deleted = true; // 打上'删除标签'，但并不是直接释放内存，而是等下次重建时释放
+        (*root)->invalid_point_num += 1; // 统计无效节点个数
         // 如果该树的无效点数正好等于树的总节点数，说明这棵树可以直接被删除，那么把树的删除标志设为true
         if ((*root)->invalid_point_num == (*root)->TreeSize) (*root)->tree_deleted = true;    
         return;
@@ -859,11 +872,14 @@ void KD_TREE::Delete_by_point(KD_TREE_NODE ** root, PointType point, bool allow_
     delete_log.point = point;
     // 到左子树递归查找     
     if (((*root)->division_axis == 0 && point.x < (*root)->point.x) || ((*root)->division_axis == 1 && point.y < (*root)->point.y) || ((*root)->division_axis == 2 && point.z < (*root)->point.z)){           
+        // 不需要重建
         if ((Rebuild_Ptr == nullptr) || (*root)->left_son_ptr != *Rebuild_Ptr){          
             Delete_by_point(&(*root)->left_son_ptr, point, allow_rebuild);         
-        } else {
+        } else { // 正在进行多线程重建
             pthread_mutex_lock(&working_flag_mutex);
+            // 在重建前旧的子树上进行标记`删除`操作
             Delete_by_point(&(*root)->left_son_ptr, point,false);
+            // 记录本次删除操作，待重建完成后在新的子树上补作业
             if (rebuild_flag){
                 pthread_mutex_lock(&rebuild_logger_mutex_lock);
                 Rebuild_Logger.push(delete_log);
@@ -896,12 +912,12 @@ void KD_TREE::Delete_by_point(KD_TREE_NODE ** root, PointType point, bool allow_
 }
 
 // box-wise re-insertion 重插入
-// box更新，可以便利的对一整个范围的点进行更新
+// box更新，可以便利地对一整个范围的点进行更新
 void KD_TREE::Add_by_range(KD_TREE_NODE ** root, BoxPointType boxpoint, bool allow_rebuild){
     if ((*root) == nullptr) return;
     (*root)->working_flag = true;
     Push_Down(*root);  
-    //论文中的判断部分，判断增加的范围是否与root的range的包含关系 
+    // 论文中的判断部分，判断增加的范围是否与root的range的包含关系 
     // 前三行是判断给定的Box范围是否与树有交集，没有的话就不用搜索了     
     if (boxpoint.vertex_max[0] <= (*root)->node_range_x[0] || boxpoint.vertex_min[0] > (*root)->node_range_x[1]) return;
     if (boxpoint.vertex_max[1] <= (*root)->node_range_y[0] || boxpoint.vertex_min[1] > (*root)->node_range_y[1]) return;
@@ -917,7 +933,9 @@ void KD_TREE::Add_by_range(KD_TREE_NODE ** root, BoxPointType boxpoint, bool all
         (*root)->invalid_point_num = (*root)->down_del_num; 
         return;
     }
-    // box包含当前节点的点
+    // 二叉树前序遍历，逐个点判断是否在box范围内，如果在的话就修改其删除标签，如果该点是因降采样而删除的，就继续保持删除状态
+    // 如果该点是因指定删除，则将其恢复保留
+    // 当前节点在box范围内
     if (boxpoint.vertex_min[0] <= (*root)->point.x && boxpoint.vertex_max[0] > (*root)->point.x && boxpoint.vertex_min[1] <= (*root)->point.y && boxpoint.vertex_max[1] > (*root)->point.y && boxpoint.vertex_min[2] <= (*root)->point.z && boxpoint.vertex_max[2] > (*root)->point.z){
         (*root)->point_deleted = (*root)->point_downsample_deleted;
     }
@@ -926,21 +944,25 @@ void KD_TREE::Add_by_range(KD_TREE_NODE ** root, BoxPointType boxpoint, bool all
     add_box_log.op = ADD_BOX;
     add_box_log.boxpoint = boxpoint;
     // 接着到其左右子树上进行递归重插入
+    // 左子树不需要重建
     if ((Rebuild_Ptr == nullptr) || (*root)->left_son_ptr != *Rebuild_Ptr){
         Add_by_range(&((*root)->left_son_ptr), boxpoint, allow_rebuild);
-    } else {
+    } else { // 左子树正在进行重建
         pthread_mutex_lock(&working_flag_mutex);
+        // 在重建前的旧树上操作，确保最近的查找操作有效
         Add_by_range(&((*root)->left_son_ptr), boxpoint, false);
         if (rebuild_flag){
+            // 在重建后的新树上补充本次操作                                   
             pthread_mutex_lock(&rebuild_logger_mutex_lock);
             Rebuild_Logger.push(add_box_log);
             pthread_mutex_unlock(&rebuild_logger_mutex_lock);                 
         }        
         pthread_mutex_unlock(&working_flag_mutex);
     }
+    // 右子树
     if ((Rebuild_Ptr == nullptr) || (*root)->right_son_ptr != *Rebuild_Ptr){
         Add_by_range(&((*root)->right_son_ptr), boxpoint, allow_rebuild);
-    } else {
+    } else { // 右子树正在进行重建
         pthread_mutex_lock(&working_flag_mutex);
         Add_by_range(&((*root)->right_son_ptr), boxpoint, false);
         if (rebuild_flag){
@@ -997,23 +1019,27 @@ void KD_TREE::Add_by_point(KD_TREE_NODE ** root, PointType point, bool allow_reb
     Push_Down(*root);
 
     // 递归插入左子树。
-    //如果在左边则进行左边的比较然后添加，首先确定当前节点的划分轴，然后判断该点应该分到左子树还是右子树
+    // 如果在左边则进行左边的比较然后添加，首先确定当前节点的划分轴，然后判断该点应该分到左子树还是右子树
     if (((*root)->division_axis == 0 && point.x < (*root)->point.x) || ((*root)->division_axis == 1 && point.y < (*root)->point.y) || ((*root)->division_axis == 2 && point.z < (*root)->point.z)){
+        // 不需要重建 或 待重建的子树不是当前节点的左子树
         if ((Rebuild_Ptr == nullptr) || (*root)->left_son_ptr != *Rebuild_Ptr){          
+            // 直接插入点
             Add_by_point(&(*root)->left_son_ptr, point, allow_rebuild, (*root)->division_axis);
-        } else {
+        } else { // 该左子树正在重建的话，则将该操作记录到Rebuild_Logger，待重建完成后补作业
             // 线程互斥锁
             pthread_mutex_lock(&working_flag_mutex);
-            // // 递归，直到找到叶子节点再新建节点并插入树中
-            Add_by_point(&(*root)->left_son_ptr, point, false,(*root)->division_axis);
+            // 递归，直到找到叶子节点再新建节点并插入树中
+            // 这里Add_by_point是向重建完成前的旧子树中插入点
+            Add_by_point(&(*root)->left_son_ptr, point, false, (*root)->division_axis);
             if (rebuild_flag){
                 pthread_mutex_lock(&rebuild_logger_mutex_lock);
+                // 记录本次插点操作，是等重建完成后向新子树中补作业
                 Rebuild_Logger.push(add_log);
                 pthread_mutex_unlock(&rebuild_logger_mutex_lock);                 
             }
             pthread_mutex_unlock(&working_flag_mutex);            
         }
-        // 递归插入右子树。
+    // 递归插入右子树。
     } else {  // 分到右子树
         if ((Rebuild_Ptr == nullptr) || (*root)->right_son_ptr != *Rebuild_Ptr){         
             Add_by_point(&(*root)->right_son_ptr, point, allow_rebuild,(*root)->division_axis);
