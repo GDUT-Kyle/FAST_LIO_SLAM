@@ -343,6 +343,13 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   }
 }
 
+/**
+ * @description: 主要是调用了IMU_init和UndistortPcl分别进行IMU积分器初始化和点云去畸变
+ * @param {MeasureGroup} &meas
+ * @param {esekf<state_ikfom, 12, input_ikfom>} &kf_state
+ * @param {Ptr} cur_pcl_un_
+ * @return {*}
+ */
 void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr cur_pcl_un_)
 {
   double t1,t2,t3;

@@ -6,38 +6,38 @@
 Preprocess::Preprocess()
   :feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
 {
-  inf_bound = 10;
-  N_SCANS   = 6;
-  group_size = 8;
-  disA = 0.01;
-  disA = 0.1; // B?
-  p2l_ratio = 225;
-  limit_maxmid =6.25;
-  limit_midmin =6.25;
-  limit_maxmin = 3.24;
+  inf_bound = 10;      // 有效点集合,大于10m则是盲区
+  N_SCANS = 6;         //多线激光雷达的线数
+  group_size = 8;      // 8个点为一组
+  disA = 0.01;         // 点集合的距离阈值,判断是否为平面
+  disB = 0.1;          // 点集合的距离阈值,判断是否为平面
+  p2l_ratio = 225;     // 点到线的距离阈值，需要大于这个值才能判断组成面
+  limit_maxmid = 6.25; // 中点到左侧的距离变化率范围
+  limit_midmin = 6.25; // 中点到右侧的距离变化率范围
+  limit_maxmin = 3.24; // 左侧到右侧的距离变化率范围
   jump_up_limit = 170.0;
   jump_down_limit = 8.0;
   cos160 = 160.0;
-  edgea = 2;
-  edgeb = 0.1;
+  edgea = 2; //点与点距离超过两倍则认为遮挡
+  edgeb = 0.1; //点与点距离超过0.1m则认为遮挡
   smallp_intersect = 172.5;
-  smallp_ratio = 1.2;
-  given_offset_time = false;
+  smallp_ratio = 1.2; //三个点如果角度大于172.5度，且比例小于1.2倍，则认为是平面
+  given_offset_time = false; //是否提供时间偏移
 
-  jump_up_limit = cos(jump_up_limit/180*M_PI);
-  jump_down_limit = cos(jump_down_limit/180*M_PI);
-  cos160 = cos(cos160/180*M_PI);
-  smallp_intersect = cos(smallp_intersect/180*M_PI);
+  jump_up_limit = cos(jump_up_limit / 180 * M_PI);       //角度大于170度的点跳过，认为在
+  jump_down_limit = cos(jump_down_limit / 180 * M_PI);   //角度小于8度的点跳过
+  cos160 = cos(cos160 / 180 * M_PI);                     //夹角限制
+  smallp_intersect = cos(smallp_intersect / 180 * M_PI); //三个点如果角度大于172.5度，且比例小于1.2倍，则认为是平面
 }
 
 Preprocess::~Preprocess() {}
 
 void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
 {
-  feature_enabled = feat_en;
-  lidar_type = lid_type;
-  blind = bld;
-  point_filter_num = pfilt_num;
+  feature_enabled = feat_en;    //是否提取特征点
+  lidar_type = lid_type;        //雷达的种类
+  blind = bld;                  //最小距离阈值，即过滤掉0～blind范围内的点云
+  point_filter_num = pfilt_num; //采样间隔，即每隔point_filter_num个点取1个点
 }
 
 void Preprocess::process(const livox_ros_driver::CustomMsg::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out)
@@ -65,39 +65,58 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
   *pcl_out = pl_surf;
 }
 
+/**
+ * @description: livox avia的点云回调函数
+ * @param {ConstPtr} &msg
+ * @return {*}
+ */
 void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
 {
+  // 清除之前的点云缓存
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
   double t1 = omp_get_wtime();
+  // 获取点云的大小
   int plsize = msg->point_num;
   // cout<<"plsie: "<<plsize<<endl;
 
+  // 分配对应大小的空间存储点云
   pl_corn.reserve(plsize);
   pl_surf.reserve(plsize);
   pl_full.resize(plsize);
 
+  // 为每条线分配足够空间存储点云
   for(int i=0; i<N_SCANS; i++)
   {
     pl_buff[i].clear();
+    /**
+     * @confuse: 有必要为每条线都分配一整个点云这么大的空间吗？
+     */    
     pl_buff[i].reserve(plsize);
   }
   uint valid_num = 0;
   
+  // 特征提取（FastLIO2默认不进行特征提取）
   if (feature_enabled)
   {
+    // 分别对每个点云进行处理
     for(uint i=1; i<plsize; i++)
     {
+      // 只取线数在0~N_SCANS内并且回波次序为0或者1的点云
       if((msg->points[i].line < N_SCANS) && ((msg->points[i].tag & 0x30) == 0x10 || (msg->points[i].tag & 0x30) == 0x00))
       {
+        // 转存点的数据
         pl_full[i].x = msg->points[i].x;
         pl_full[i].y = msg->points[i].y;
         pl_full[i].z = msg->points[i].z;
+        // 反射强度值
         pl_full[i].intensity = msg->points[i].reflectivity;
+        // 使用曲率作为每个激光点的时间
         pl_full[i].curvature = msg->points[i].offset_time / float(1000000); //use curvature as time of each laser points
 
         bool is_new = false;
+        // 只有当当前点和上一点的间距足够大（>1e-7），才将当前点认为是有用的点，分别加入到对应line的pl_buff队列中
         if((abs(pl_full[i].x - pl_full[i-1].x) > 1e-7) 
             || (abs(pl_full[i].y - pl_full[i-1].y) > 1e-7)
             || (abs(pl_full[i].z - pl_full[i-1].z) > 1e-7))
@@ -110,6 +129,7 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
     static double time = 0.0;
     count ++;
     double t0 = omp_get_wtime();
+    // 对每条线中的点进行处理，提取局部特征
     for(int j=0; j<N_SCANS; j++)
     {
       if(pl_buff[j].size() <= 5) continue;
@@ -121,6 +141,7 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
       plsize--;
       for(uint i=0; i<plsize; i++)
       {
+        // 该点在xy平面的投影距离
         types[i].range = pl[i].x * pl[i].x + pl[i].y * pl[i].y;
         vx = pl[i].x - pl[i + 1].x;
         vy = pl[i].y - pl[i + 1].y;
@@ -128,6 +149,7 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
         types[i].dista = vx * vx + vy * vy + vz * vz;
       }
       types[plsize].range = pl[plsize].x * pl[plsize].x + pl[plsize].y * pl[plsize].y;
+      // 从点云中获取不同类型的特征
       give_feature(pl, types);
       // pl_surf += pl;
     }
@@ -457,57 +479,76 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
   }
   uint head = 0;
 
+  // 过滤盲区的点
   while(types[head].range < blind)
   {
     head++;
   }
 
   // Surf
-  plsize2 = (plsize > group_size) ? (plsize - group_size) : 0;
+  plsize2 = (plsize > group_size) ? (plsize - group_size) : 0; //判断当前点后面是否还有8个点 够的话就逐渐减少
 
-  Eigen::Vector3d curr_direct(Eigen::Vector3d::Zero());
-  Eigen::Vector3d last_direct(Eigen::Vector3d::Zero());
+  Eigen::Vector3d curr_direct(Eigen::Vector3d::Zero()); //当前平面的法向量
+  Eigen::Vector3d last_direct(Eigen::Vector3d::Zero()); //上一个平面的法向量
 
-  uint i_nex = 0, i2;
-  uint last_i = 0; uint last_i_nex = 0;
-  int last_state = 0;
+  uint i_nex = 0, i2; // i2为当前点的下一个点
+  uint last_i = 0;    // last_i为上一个点的保存的索引
+  uint last_i_nex = 0;// last_i_nex为上一个点的下一个点的索引
+  int last_state = 0; //为1代表上个状态为平面 否则为0
+
+  //判断面点
   int plane_type;
 
+  // 拿到8个点用于判断平面
   for(uint i=head; i<plsize2; i++)
   {
-    if(types[i].range < blind)
+    if(types[i].range < blind)  // 在盲区范围内的点不做处理
     {
       continue;
     }
 
-    i2 = i;
+    i2 = i; //更新i2
 
+    // 求得平面，并返回类型0 1 2
     plane_type = plane_judge(pl, types, i, i_nex, curr_direct);
     
+    // 返回1一般默认是平面
     if(plane_type == 1)
     {
+      //设置确定的平面点和可能的平面点
       for(uint j=i; j<=i_nex; j++)
-      { 
+      {
+        // * * * * * *
+        // i         i_nex
+        // i和i_nex为Poss_Plane， 中间的点为Real_Plane
         if(j!=i && j!=i_nex)
         {
+          //把起始点和终止点之间的所有点设置为确定的平面点
           types[j].ftype = Real_Plane;
         }
         else
         {
+          //把起始点和终止点设置为可能的平面点
           types[j].ftype = Poss_Plane;
         }
       }
       
       // if(last_state==1 && fabs(last_direct.sum())>0.5)
+      // 最开始last_state=0直接跳过
+      // 之后last_state=1
+      // 如果之前状态是平面则判断当前点是处于两平面边缘的点还是较为平坦的平面的点
       if(last_state==1 && last_direct.norm()>0.1)
       {
+        // 计算cos(last_n, curr_n)
         double mod = last_direct.transpose() * curr_direct;
         if(mod>-0.707 && mod<0.707)
         {
+          //修改ftype，两个面法向量夹角在45度和135度之间 认为是两平面边缘上的点
           types[i].ftype = Edge_Plane;
         }
         else
         {
+          //否则认为是真正的平面点
           types[i].ftype = Real_Plane;
         }
       }
@@ -517,75 +558,33 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     }
     else // if(plane_type == 2)
     {
+      // plane_type=0或2的时候
       i = i_nex;
-      last_state = 0;
+      last_state = 0; //设置为不是平面点
     }
-    // else if(plane_type == 0)
-    // {
-    //   if(last_state == 1)
-    //   {
-    //     uint i_nex_tem;
-    //     uint j;
-    //     for(j=last_i+1; j<=last_i_nex; j++)
-    //     {
-    //       uint i_nex_tem2 = i_nex_tem;
-    //       Eigen::Vector3d curr_direct2;
-
-    //       uint ttem = plane_judge(pl, types, j, i_nex_tem, curr_direct2);
-
-    //       if(ttem != 1)
-    //       {
-    //         i_nex_tem = i_nex_tem2;
-    //         break;
-    //       }
-    //       curr_direct = curr_direct2;
-    //     }
-
-    //     if(j == last_i+1)
-    //     {
-    //       last_state = 0;
-    //     }
-    //     else
-    //     {
-    //       for(uint k=last_i_nex; k<=i_nex_tem; k++)
-    //       {
-    //         if(k != i_nex_tem)
-    //         {
-    //           types[k].ftype = Real_Plane;
-    //         }
-    //         else
-    //         {
-    //           types[k].ftype = Poss_Plane;
-    //         }
-    //       }
-    //       i = i_nex_tem-1;
-    //       i_nex = i_nex_tem;
-    //       i2 = j-1;
-    //       last_state = 1;
-    //     }
-
-    //   }
-    // }
 
     last_i = i2;
     last_i_nex = i_nex;
     last_direct = curr_direct;
   }
 
-  plsize2 = plsize > 3 ? plsize - 3 : 0;
+  //判断边缘点
+  plsize2 = plsize > 3 ? plsize - 3 : 0; //如果剩下的点数小于3则不判断边缘点，否则计算哪些点是边缘点
   for(uint i=head+3; i<plsize2; i++)
   {
+    //点不能在盲区 或者 点必须属于正常点和可能的平面点
     if(types[i].range<blind || types[i].ftype>=Real_Plane)
     {
       continue;
     }
 
+    //该点与前后点的距离不能挨的太近
     if(types[i-1].dista<1e-16 || types[i].dista<1e-16)
     {
       continue;
     }
 
-    Eigen::Vector3d vec_a(pl[i].x, pl[i].y, pl[i].z);
+    Eigen::Vector3d vec_a(pl[i].x, pl[i].y, pl[i].z); //当前点组成的向量
     Eigen::Vector3d vecs[2];
 
     for(int j=0; j<2; j++)
@@ -596,37 +595,44 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
         m = 1;
       }
 
+      //若当前的前/后一个点在盲区内（4m)
       if(types[i+m].range < blind)
       {
-        if(types[i].range > inf_bound)
+        if(types[i].range > inf_bound) //若其大于10m
         {
-          types[i].edj[j] = Nr_inf;
+          types[i].edj[j] = Nr_inf; //赋予该点Nr_inf(跳变较远)
         }
         else
         {
-          types[i].edj[j] = Nr_blind;
+          types[i].edj[j] = Nr_blind; //赋予该点Nr_blind(在盲区)
         }
         continue;
       }
 
       vecs[j] = Eigen::Vector3d(pl[i+m].x, pl[i+m].y, pl[i+m].z);
-      vecs[j] = vecs[j] - vec_a;
+      vecs[j] = vecs[j] - vec_a; // 前/后点指向当前点的向量
+      // 若雷达坐标系原点为O 当前点为A 前/后一点为M和N
+      // 则下面OA点乘MA/（|OA|*|MA|）
+      // 得到的是cos角OAM的大小
       
-      types[i].angle[j] = vec_a.dot(vecs[j]) / vec_a.norm() / vecs[j].norm();
-      if(types[i].angle[j] < jump_up_limit)
+      types[i].angle[j] = vec_a.dot(vecs[j]) / vec_a.norm() / vecs[j].norm(); //角MAN的cos值
+
+      //前一个点是正常点 && 下一个点在激光线上 && 当前点与后一个点的距离大于0.0225m && 当前点与后一个点的距离大于当前点与前一个点距离的四倍
+      //这种边缘点像是7字形这种的边缘？
+      if(types[i].angle[j] < jump_up_limit) // cos(170)
       {
-        types[i].edj[j] = Nr_180;
+        types[i].edj[j] = Nr_180; // M在OA延长线上
       }
-      else if(types[i].angle[j] > jump_down_limit)
+      else if(types[i].angle[j] > jump_down_limit) // cos(8)
       {
-        types[i].edj[j] = Nr_zero;
+        types[i].edj[j] = Nr_zero; // M在OA上
       }
     }
 
     types[i].intersect = vecs[Prev].dot(vecs[Next]) / vecs[Prev].norm() / vecs[Next].norm();
     if(types[i].edj[Prev]==Nr_nor && types[i].edj[Next]==Nr_zero && types[i].dista>0.0225 && types[i].dista>4*types[i-1].dista)
     {
-      if(types[i].intersect > cos160)
+      if(types[i].intersect > cos160) //角MAN要小于160度 不然就平行于激光了
       {
         if(edge_jump_judge(pl, types, i, Prev))
         {
@@ -634,6 +640,8 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
         }
       }
     }
+    //与上面类似
+    //前一个点在激光束上 && 后一个点正常 && 前一个点与当前点的距离大于0.0225m && 前一个点与当前点的距离大于当前点与后一个点距离的四倍
     else if(types[i].edj[Prev]==Nr_zero && types[i].edj[Next]== Nr_nor && types[i-1].dista>0.0225 && types[i-1].dista>4*types[i].dista)
     {
       if(types[i].intersect > cos160)
@@ -644,6 +652,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
         }
       }
     }
+    //前面的是正常点 && (当前点到中心距离>10m并且后点在盲区)
     else if(types[i].edj[Prev]==Nr_nor && types[i].edj[Next]==Nr_inf)
     {
       if(edge_jump_judge(pl, types, i, Prev))
@@ -651,6 +660,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
         types[i].ftype = Edge_Jump;
       }
     }
+    //(当前点到中心距离>10m并且前点在盲区) && 后面的是正常点
     else if(types[i].edj[Prev]==Nr_inf && types[i].edj[Next]==Nr_nor)
     {
       if(edge_jump_judge(pl, types, i, Next))
@@ -659,31 +669,35 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
       }
      
     }
+    //前后点都不是正常点
     else if(types[i].edj[Prev]>Nr_nor && types[i].edj[Next]>Nr_nor)
     {
       if(types[i].ftype == Nor)
       {
-        types[i].ftype = Wire;
+        types[i].ftype = Wire; //程序中应该没使用 当成空间中的小线段或者无用点了
       }
     }
   }
 
   plsize2 = plsize-1;
   double ratio;
+  //继续找平面点
   for(uint i=head+1; i<plsize2; i++)
   {
+    //前面、当前、之后三个点都需要不在盲区内
     if(types[i].range<blind || types[i-1].range<blind || types[i+1].range<blind)
     {
       continue;
     }
-    
+    //前面和当前 当前和之后的点与点之间距离都不能太近
     if(types[i-1].dista<1e-8 || types[i].dista<1e-8)
     {
       continue;
     }
-
+    //还剩下来一些正常点继续找平面点
     if(types[i].ftype == Nor)
     {
+      //求点与点间距的比例 大间距/小间距
       if(types[i-1].dista > types[i].dista)
       {
         ratio = types[i-1].dista / types[i].dista;
@@ -693,6 +707,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
         ratio = types[i].dista / types[i-1].dista;
       }
 
+      //如果夹角大于172.5度 && 间距比例<1.2
       if(types[i].intersect<smallp_intersect && ratio < smallp_ratio)
       {
         if(types[i-1].ftype == Nor)
@@ -708,16 +723,19 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     }
   }
 
+  //存储平面点
   int last_surface = -1;
   for(uint j=head; j<plsize; j++)
   {
+    //可能的平面点和确定的平面点
     if(types[j].ftype==Poss_Plane || types[j].ftype==Real_Plane)
     {
       if(last_surface == -1)
       {
         last_surface = j;
       }
-    
+      //通常连着好几个都是面点
+      //必须在采样间隔上的平面点才使用（这里的是无差别滤波 从每次新找到面点开始每几个点才取一个）
       if(j == uint(last_surface+point_filter_num-1))
       {
         PointType ap;
@@ -733,13 +751,16 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     }
     else
     {
+      //跳变较大的边缘边的点 位于平面边缘的点
       if(types[j].ftype==Edge_Jump || types[j].ftype==Edge_Plane)
       {
         pl_corn.push_back(pl[j]);
       }
+      //假如上次找到的面点被无差别滤波掉了，而此时已经到了边缘
       if(last_surface != -1)
       {
         PointType ap;
+        //取上次面点到此次边缘线之间的所有点的重心当作一个面点存储进去
         for(uint k=last_surface; k<j; k++)
         {
           ap.x += pl[k].x;

@@ -239,6 +239,8 @@ void lasermap_fov_segment()
     //初始化局部地图包围盒角点，以为w系下lidar位置为中心
     if (!Localmap_Initialized){ // 系统起始需要初始化局部地图的大小和位置
         for (int i = 0; i < 3; i++){
+            // 以当前位置为质心，张成一个变成边长为cube_len(200m)的box
+            // 这个box由对角线的定点唯一确定
             LocalMap_Points.vertex_min[i] = pos_LiD(i) - cube_len / 2.0;
             LocalMap_Points.vertex_max[i] = pos_LiD(i) + cube_len / 2.0;
         }
@@ -256,10 +258,13 @@ void lasermap_fov_segment()
     }
     // 没有超出地图则返回
     if (!need_move) return;
+    // 如果超出的话，就需要进行滑窗的移动，也就是利用ikd tree的box-wise更新功能
     BoxPointType New_LocalMap_Points, tmp_boxpoints;
     // 新的局部地图盒子边界点
     New_LocalMap_Points = LocalMap_Points;
+    // 计算fov-box需要移动的距离
     float mov_dist = max((cube_len - 2.0 * MOV_THRESHOLD * DET_RANGE) * 0.5 * 0.9, double(DET_RANGE * (MOV_THRESHOLD -1)));
+    // 逐个轴上进行移动
     for (int i = 0; i < 3; i++){
         tmp_boxpoints = LocalMap_Points;
         //与包围盒最小值边界点距离
@@ -267,7 +272,7 @@ void lasermap_fov_segment()
             New_LocalMap_Points.vertex_max[i] -= mov_dist;
             New_LocalMap_Points.vertex_min[i] -= mov_dist;
             tmp_boxpoints.vertex_min[i] = LocalMap_Points.vertex_max[i] - mov_dist;
-            cub_needrm.push_back(tmp_boxpoints); // 移除较远包围盒
+            cub_needrm.push_back(tmp_boxpoints); // 移除较远包围盒，待会放入ikd-tree中进行删除点
         } else if (dist_to_map_edge[i][1] <= MOV_THRESHOLD * DET_RANGE){
             New_LocalMap_Points.vertex_max[i] += mov_dist;
             New_LocalMap_Points.vertex_min[i] += mov_dist;
@@ -277,6 +282,7 @@ void lasermap_fov_segment()
     }
     LocalMap_Points = New_LocalMap_Points;
 
+    // 查看已删除的点，估计作者用于debug和可视化
     points_cache_collect();
     double delete_begin = omp_get_wtime();
     // 使用Boxs删除指定盒内的点
@@ -370,6 +376,11 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     sig_buffer.notify_all();
 }
 
+/**
+ * @description: 主要处理了buffer中的数据，将两帧激光雷达点云数据时间内的IMU数据从缓存队列中取出，进行时间对齐，并保存到meas中
+ * @param {MeasureGroup} &meas
+ * @return {*}
+ */
 bool sync_packages(MeasureGroup &meas)
 {
     if (lidar_buffer.empty() || imu_buffer.empty()) {
