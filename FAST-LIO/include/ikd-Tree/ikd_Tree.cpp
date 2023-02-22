@@ -432,7 +432,7 @@ void KD_TREE::Nearest_Search(PointType point, int k_nearest, PointVector& Neares
         Search(Root_Node, k_nearest, point, q, max_dist);
     } else {                                                   // 重建正在进行
         pthread_mutex_lock(&search_flag_mutex);
-        while (search_mutex_counter == -1)
+        while (search_mutex_counter == -1) // 如果搜索功能被锁定，则持续等待
         {
             pthread_mutex_unlock(&search_flag_mutex);
             usleep(1);
@@ -1137,6 +1137,7 @@ void KD_TREE::Search(KD_TREE_NODE * root, int k_nearest, PointType point, MANUAL
                 search_mutex_counter -= 1;
                 pthread_mutex_unlock(&search_flag_mutex);
             }
+            // 搜索完左子树后再到右子树搜索
             // bounds-overlap-ball搜索法（实现策略略有不同，效果一样）
             if (q.size() < k_nearest || dist_right_node < q.top().dist) {
                 if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != root->right_son_ptr){
@@ -1628,9 +1629,14 @@ float KD_TREE::calc_dist(PointType a, PointType b){
     return dist;
 }
 
-// 首先获取node构成的树的范围，就是一个Box。然后逐个面判断point是否在box外，如果在Box外，则
+// 首先获取node子树张成的box空间，然后逐个面判断point是否在box外，如果在Box外，则
 // 计算离point的面的距离之“平方”和
-// 有个疑惑，这样计算的结果真的是点到Box的距离吗
+// 四种情况：
+// 1. point在box内，则Point与box的距离为0
+// 2. point在box外，离Point最近的是box某一个面，例如p.x>box.max_x, box.min_y<p.y<box.max_y, box.min_z<p.z<box.max_z，最小距离是点面距离
+// 3. point在box外，离point最近的是box某一条边，例如p.x>box.max_x， p.y>box.max_y, box.min_z<p.z<box.max_z，最小距离是点线距离
+// 4. point在box外，离point最近的是box某一个顶点，例如p.x>box.max_x， p.y>box.max_y， p.z>box.max_z，最小距离是点点距离
+// 该函数非常巧妙地将4种情况囊括下来了
 float KD_TREE::calc_box_dist(KD_TREE_NODE * node, PointType point){
     if (node == nullptr) return INFINITY;
     float min_dist = 0.0;
